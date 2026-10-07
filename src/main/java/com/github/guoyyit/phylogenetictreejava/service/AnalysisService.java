@@ -3,6 +3,7 @@ package com.github.guoyyit.phylogenetictreejava.service;
 import com.github.guoyyit.phylogenetictreejava.bootstrap.BootstrapConfig;
 import com.github.guoyyit.phylogenetictreejava.bootstrap.BootstrapEngine;
 import com.github.guoyyit.phylogenetictreejava.bootstrap.BootstrapResult;
+import com.github.guoyyit.phylogenetictreejava.distance.DistanceCalculator;
 import com.github.guoyyit.phylogenetictreejava.exception.AlignmentException;
 import com.github.guoyyit.phylogenetictreejava.io.FastaReader;
 import com.github.guoyyit.phylogenetictreejava.model.Alignment;
@@ -62,9 +63,13 @@ public final class AnalysisService {
     /**
      * Validates and persists the request, then starts execution asynchronously.
      * Throws {@link AlignmentException} for invalid input; nothing is persisted.
+     * All validation, including pairwise comparable-site checks, happens synchronously
+     * before any task directory is created, so a rejected submission returns a client
+     * error instead of failing later during asynchronous execution.
      */
     public synchronized String submit(String fasta, BootstrapConfig config) {
         Alignment alignment = FastaReader.parse(fasta);
+        DistanceCalculator.validatePairwiseInformation(alignment);
         BootstrapConfig effective = normalize(config);
         String taskId = newTaskId();
         while (store.exists(taskId)) {

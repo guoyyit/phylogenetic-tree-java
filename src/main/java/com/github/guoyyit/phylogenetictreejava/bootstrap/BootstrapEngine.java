@@ -100,7 +100,7 @@ public final class BootstrapEngine {
             }
             resampled.add(new Sequence(sequence.name(), data.toString()));
         }
-        DistanceMatrix matrix = DistanceCalculator.compute(new Alignment(resampled, length));
+        DistanceMatrix matrix = DistanceCalculator.computeLenient(new Alignment(resampled, length));
         return NeighborJoining.build(matrix);
     }
 

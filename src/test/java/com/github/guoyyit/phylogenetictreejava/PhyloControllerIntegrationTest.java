@@ -80,4 +80,33 @@ class PhyloControllerIntegrationTest {
         JsonNode json = mapper.readTree(response.getBody());
         assertEquals("LENGTH_MISMATCH", json.get("error").asText());
     }
+
+    @Test
+    void duplicateNamesRejectedSynchronouslyAsClientError() throws Exception {
+        String body = """
+                {"fasta":">a\\nACGT\\n>b\\nACGA\\n>a\\nACGG\\n"}""";
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        ResponseEntity<String> response = rest.postForEntity(url("/api/analyses"),
+                new HttpEntity<>(body, headers), String.class);
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        JsonNode json = mapper.readTree(response.getBody());
+        assertEquals("DUPLICATE_NAME", json.get("error").asText());
+        assertTrue(json.get("message").asText().contains("a"));
+    }
+
+    @Test
+    void pairWithoutComparableSitesRejectedBeforeAcceptance() throws Exception {
+        // a and b share no comparable site, yet the alignment as a whole has
+        // informative columns; must be a 400 at submit time, never a 202.
+        String body = """
+                {"fasta":">a\\nAC--\\n>b\\n--GT\\n>c\\nACGT\\n"}""";
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        ResponseEntity<String> response = rest.postForEntity(url("/api/analyses"),
+                new HttpEntity<>(body, headers), String.class);
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        JsonNode json = mapper.readTree(response.getBody());
+        assertEquals("INSUFFICIENT_INFORMATION", json.get("error").asText());
+    }
 }

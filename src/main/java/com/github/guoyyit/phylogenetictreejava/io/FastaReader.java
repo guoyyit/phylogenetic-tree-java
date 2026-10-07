@@ -55,7 +55,8 @@ public final class FastaReader {
                         ? "seq" + (names.size() + 1)
                         : header.split("\\s+", 2)[0];
                 if (!seenNames.add(name)) {
-                    throw new IllegalArgumentException("duplicate sequence name: " + name);
+                    throw new AlignmentException(RejectReason.DUPLICATE_NAME,
+                            "duplicate sequence name: " + name);
                 }
                 names.add(name);
                 bodies.add(new StringBuilder());

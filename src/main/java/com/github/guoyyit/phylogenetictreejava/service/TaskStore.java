@@ -1,7 +1,5 @@
 package com.github.guoyyit.phylogenetictreejava.service;
 
-import java.nio.file.Path;
-
 import com.github.guoyyit.phylogenetictreejava.io.NewickParser;
 import com.github.guoyyit.phylogenetictreejava.io.NewickWriter;
 import com.github.guoyyit.phylogenetictreejava.model.Alignment;
@@ -201,7 +199,22 @@ public final class TaskStore {
                 Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
             }
         } finally {
+            // Cancellation/timeout interrupts in-flight worker threads: a leftover
+            // temp file must never survive just because this cleanup was interrupted.
+            deleteTempQuietly(temp);
+        }
+    }
+
+    private static void deleteTempQuietly(Path temp) {
+        boolean interrupted = Thread.interrupted();
+        try {
             Files.deleteIfExists(temp);
+        } catch (IOException | RuntimeException ignored) {
+            // Best-effort: stale temp files are also swept before crash recovery.
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 }
