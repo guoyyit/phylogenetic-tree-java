@@ -2,6 +2,7 @@ package com.github.guoyyit.phylogenetictreejava.consensus;
 
 import com.github.guoyyit.phylogenetictreejava.model.TreeNode;
 
+import java.util.BitSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -19,6 +20,10 @@ public final class ConsensusBuilder {
      * Returns a copy of {@code reference} whose internal branches are annotated with
      * the fraction of replicate trees inducing the same leaf split. The reference
      * topology (from the original alignment) is preserved; only support is added.
+     *
+     * <p>Splits are represented with {@link BitSet}, so the analysis scales beyond
+     * 63 sequences (at least 128 supported); behavior is unchanged for smaller
+     * inputs.
      */
     public static TreeNode annotate(TreeNode reference, List<TreeNode> replicateTrees) {
         List<String> leaves = new java.util.ArrayList<>();
@@ -27,23 +32,20 @@ public final class ConsensusBuilder {
         for (int i = 0; i < leaves.size(); i++) {
             index.put(leaves.get(i), i);
         }
-        if (leaves.size() > 63) {
-            throw new IllegalArgumentException(
-                    "bootstrap consensus supports at most 63 sequences, got " + leaves.size());
-        }
+        int leafCount = leaves.size();
 
         int replicates = replicateTrees.size();
-        Map<Long, Integer> splitCounts = new HashMap<>();
+        Map<BitSet, Integer> splitCounts = new HashMap<>();
         for (TreeNode tree : replicateTrees) {
-            Set<Long> splits = new java.util.HashSet<>();
-            collectSplits(tree, index, leaves.size(), splits);
-            for (long split : splits) {
+            Set<BitSet> splits = new java.util.HashSet<>();
+            collectSplits(tree, index, leafCount, splits);
+            for (BitSet split : splits) {
                 splitCounts.merge(split, 1, Integer::sum);
             }
         }
 
         TreeNode copy = copyTree(reference);
-        annotateNode(copy, index, leaves.size(), splitCounts, replicates);
+        annotateNode(copy, index, leafCount, splitCounts, replicates);
         return copy;
     }
 
@@ -57,57 +59,78 @@ public final class ConsensusBuilder {
         }
     }
 
-    private static long collectSplits(TreeNode node, Map<String, Integer> index, int leafCount,
-                                      Set<Long> splits) {
+    private static BitSet collectSplits(TreeNode node, Map<String, Integer> index, int leafCount,
+                                       Set<BitSet> splits) {
         if (node.isLeaf()) {
             Integer bit = index.get(node.getLabel());
-            return bit == null ? 0L : (1L << bit);
+            BitSet leafMask = new BitSet(leafCount);
+            if (bit != null) {
+                leafMask.set(bit);
+            }
+            return leafMask;
         }
-        long mask = 0L;
+        BitSet mask = new BitSet(leafCount);
         for (TreeNode child : node.getChildren()) {
-            mask |= collectSplits(child, index, leafCount, splits);
+            mask.or(collectSplits(child, index, leafCount, splits));
         }
-        int bits = Long.bitCount(mask);
-        if (bits > 1 && bits < leafCount - 1) {
+        int bits = mask.cardinality();
+        if (bits > 1 && bits < leafCount) {
             splits.add(normalizeSplit(mask, leafCount));
         }
         return mask;
     }
 
-    private static long normalizeSplit(long mask, int leafCount) {
-        long allLeaves = (1L << leafCount) - 1L;
-        long complement = allLeaves & ~mask;
-        return Long.compareUnsigned(mask, complement) <= 0 ? mask : complement;
+    /**
+     * Orientation-independent canonical representative of a bipartition. Mask and
+     * its complement jointly cover all leaf positions and are disjoint, so the most
+     * significant leaf bit uniquely decides which side is numerically smaller
+     * (identical rule to the former {@code Long.compareUnsigned} representation).
+     */
+    private static BitSet normalizeSplit(BitSet mask, int leafCount) {
+        if (leafCount == 0) {
+            return (BitSet) mask.clone();
+        }
+        return mask.get(leafCount - 1) ? complement(mask, leafCount) : (BitSet) mask.clone();
+    }
+
+    private static BitSet complement(BitSet mask, int leafCount) {
+        BitSet complement = new BitSet(leafCount);
+        complement.set(0, leafCount);
+        complement.andNot(mask);
+        return complement;
     }
 
     private static void annotateNode(TreeNode node, Map<String, Integer> index, int leafCount,
-                                     Map<Long, Integer> splitCounts, int replicates) {
+                                     Map<BitSet, Integer> splitCounts, int replicates) {
         if (node.isLeaf()) {
             return;
         }
-        long mask = 0L;
+        BitSet mask = new BitSet(leafCount);
         for (TreeNode child : node.getChildren()) {
             annotateNode(child, index, leafCount, splitCounts, replicates);
-            mask |= subtreeMask(child, index);
+            mask.or(subtreeMask(child, index, leafCount));
         }
-        int bits = Long.bitCount(mask);
-        if (bits == leafCount) {
+        if (mask.cardinality() == leafCount) {
             node.setSupport(replicates == 0 ? 0.0 : 1.0);
             return;
         }
-        long split = normalizeSplit(mask, leafCount);
+        BitSet split = normalizeSplit(mask, leafCount);
         int count = splitCounts.getOrDefault(split, 0);
         node.setSupport(replicates == 0 ? 0.0 : (double) count / replicates);
     }
 
-    private static long subtreeMask(TreeNode node, Map<String, Integer> index) {
+    private static BitSet subtreeMask(TreeNode node, Map<String, Integer> index, int leafCount) {
         if (node.isLeaf()) {
             Integer bit = index.get(node.getLabel());
-            return bit == null ? 0L : (1L << bit);
+            BitSet leafMask = new BitSet(leafCount);
+            if (bit != null) {
+                leafMask.set(bit);
+            }
+            return leafMask;
         }
-        long mask = 0L;
+        BitSet mask = new BitSet(leafCount);
         for (TreeNode child : node.getChildren()) {
-            mask |= subtreeMask(child, index);
+            mask.or(subtreeMask(child, index, leafCount));
         }
         return mask;
     }

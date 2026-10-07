@@ -6,11 +6,13 @@ import com.github.guoyyit.phylogenetictreejava.exception.RejectReason;
 import com.github.guoyyit.phylogenetictreejava.service.AnalysisService;
 import com.github.guoyyit.phylogenetictreejava.service.AnalysisStatus;
 import com.github.guoyyit.phylogenetictreejava.service.AnalysisTask;
+import com.github.guoyyit.phylogenetictreejava.service.TaskStore;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -53,6 +55,32 @@ class AnalysisServiceTest {
                         new BootstrapConfig(10, 1L, 1, 0)));
         assertEquals(RejectReason.TOO_FEW_SEQUENCES, error.getReason());
         assertFalse(service.status("anything").isPresent());
+    }
+
+    @Test
+    void duplicateNamesAreRejectedSynchronouslyWithNoTaskDirectory(@TempDir Path temp)
+            throws Exception {
+        AnalysisService service = new AnalysisService(temp, 2);
+        AlignmentException error = assertThrows(AlignmentException.class,
+                () -> service.submit(">a\nACGT\n>b\nACGA\n>a\nACGC\n",
+                        new BootstrapConfig(10, 1L, 1, 0)));
+        assertEquals(RejectReason.DUPLICATE_NAME, error.getReason());
+        // No 202: the rejection must not create a task or leave a working directory.
+        assertEquals(List.of(), java.nio.file.Files.list(temp).toList());
+        service.shutdown();
+    }
+
+    @Test
+    void pairWithoutComparableSitesIsRejectedSynchronouslyWithNoTaskDirectory(
+            @TempDir Path temp) throws Exception {
+        AnalysisService service = new AnalysisService(temp, 2);
+        AlignmentException error = assertThrows(AlignmentException.class,
+                () -> service.submit(
+                        ">a\nACGTACGT\n>b\n--NNNNNN\n>c\nTTTTAAAA\n",
+                        new BootstrapConfig(10, 1L, 1, 0)));
+        assertEquals(RejectReason.INSUFFICIENT_INFORMATION, error.getReason());
+        assertEquals(List.of(), java.nio.file.Files.list(temp).toList());
+        service.shutdown();
     }
 
     @Test
@@ -151,6 +179,156 @@ class AnalysisServiceTest {
                 recovered.getStore().readOutput(interruptedId, "consensus.nwk"));
         recovered.shutdown();
         uninterrupted.shutdown();
+    }
+
+    // ------------------------------------------------------------------
+    // Large-scale requirements (>=128 sequences, >=200 columns).
+    // ------------------------------------------------------------------
+
+    private static final int LARGE_SEQUENCES = 128;
+    private static final int LARGE_LENGTH = 200;
+    private static final int LARGE_REPLICATES = 40;
+
+    @Test
+    void largeRunIsByteIdenticalAtConcurrency1And8(@TempDir Path temp) throws Exception {
+        String fasta = LargeAlignmentFixtures.randomDnaFasta(
+                LARGE_SEQUENCES, LARGE_LENGTH, 8080L);
+
+        Path serialDir = temp.resolve("serial");
+        AnalysisService serial = new AnalysisService(serialDir, 1);
+        String serialId = serial.submit(fasta,
+                new BootstrapConfig(LARGE_REPLICATES, 2718L, 1, 0));
+        awaitTerminal(serial, serialId);
+        assertEquals(AnalysisStatus.COMPLETED,
+                serial.status(serialId).orElseThrow().getStatus());
+
+        Path parallelDir = temp.resolve("parallel");
+        AnalysisService parallel = new AnalysisService(parallelDir, 8);
+        String parallelId = parallel.submit(fasta,
+                new BootstrapConfig(LARGE_REPLICATES, 2718L, 8, 0));
+        awaitTerminal(parallel, parallelId);
+        assertEquals(AnalysisStatus.COMPLETED,
+                parallel.status(parallelId).orElseThrow().getStatus());
+
+        assertEquals(serial.getStore().readOutput(serialId, "bootstrap-trees.nwk"),
+                parallel.getStore().readOutput(parallelId, "bootstrap-trees.nwk"));
+        assertEquals(serial.getStore().readOutput(serialId, "consensus.nwk"),
+                parallel.getStore().readOutput(parallelId, "consensus.nwk"));
+        serial.shutdown();
+        parallel.shutdown();
+    }
+
+    @Test
+    void largeRunRecoveryIsByteIdenticalToUninterruptedRun(@TempDir Path temp) throws Exception {
+        String fasta = LargeAlignmentFixtures.randomDnaFasta(
+                LARGE_SEQUENCES, LARGE_LENGTH, 9090L);
+        int total = LARGE_REPLICATES;
+        String interruptedId;
+        try (AnalysisServiceInterruption killed =
+                     new AnalysisServiceInterruption(temp.resolve("crash"), 8)) {
+            interruptedId = killed.service.submit(fasta,
+                    new BootstrapConfig(total, 1618L, 8, 0));
+            awaitSomeButNotAllReplicates(killed.service, interruptedId, total);
+            // Abrupt "crash": shutdown without cancelling or finalizing.
+        }
+
+        TaskStore store = new TaskStore(temp.resolve("crash"));
+        int before = store.completedReplicates(interruptedId, total).size();
+        assertTrue(before > 0 && before < total,
+                "expected a partial set of persisted replicates, got " + before);
+
+        AnalysisService recovered = new AnalysisService(temp.resolve("crash"), 8);
+        recovered.recoverInterruptedTasks();
+        awaitTerminal(recovered, interruptedId);
+        assertEquals(AnalysisStatus.COMPLETED,
+                recovered.status(interruptedId).orElseThrow().getStatus());
+        // Already completed replicates are never recomputed or counted twice.
+        assertEquals(total,
+                recovered.status(interruptedId).orElseThrow().getCompletedReplicates());
+
+        AnalysisService uninterrupted = new AnalysisService(temp.resolve("clean"), 8);
+        String cleanId = uninterrupted.submit(fasta,
+                new BootstrapConfig(total, 1618L, 8, 0));
+        awaitTerminal(uninterrupted, cleanId);
+
+        assertEquals(uninterrupted.getStore().readOutput(cleanId, "bootstrap-trees.nwk"),
+                recovered.getStore().readOutput(interruptedId, "bootstrap-trees.nwk"));
+        assertEquals(uninterrupted.getStore().readOutput(cleanId, "consensus.nwk"),
+                recovered.getStore().readOutput(interruptedId, "consensus.nwk"));
+        recovered.shutdown();
+        uninterrupted.shutdown();
+    }
+
+    @Test
+    void largeCancellationWritesNoPartialFinalResultAndDoesNotAffectOtherTasks(
+            @TempDir Path temp) throws Exception {
+        AnalysisService service = new AnalysisService(temp, 8);
+        String fasta = LargeAlignmentFixtures.randomDnaFasta(
+                LARGE_SEQUENCES, LARGE_LENGTH, 3030L);
+
+        String victim = service.submit(fasta,
+                new BootstrapConfig(10_000_000, 5L, 8, 0));
+        String survivor = service.submit(fasta,
+                new BootstrapConfig(LARGE_REPLICATES, 6L, 8, 0));
+
+        Thread.sleep(300);
+        assertTrue(service.cancel(victim));
+        awaitTerminal(service, victim);
+        assertEquals(AnalysisStatus.CANCELLED,
+                service.status(victim).orElseThrow().getStatus());
+        assertFalse(service.getStore().hasOutputs(victim));
+        assertNoTempFiles(service, victim);
+
+        // The independent task still completes and produces intact outputs.
+        awaitTerminal(service, survivor);
+        assertEquals(AnalysisStatus.COMPLETED,
+                service.status(survivor).orElseThrow().getStatus());
+        assertTrue(service.getStore().hasOutputs(survivor));
+        assertFalse(service.getStore().readOutput(survivor, "consensus.nwk").isBlank());
+        assertEquals(LARGE_REPLICATES,
+                service.getStore().readOutput(survivor, "bootstrap-trees.nwk").lines()
+                        .filter(line -> !line.isBlank()).count());
+        service.shutdown();
+    }
+
+    @Test
+    void largeTimeoutWritesNoPartialFinalResult(@TempDir Path temp) throws Exception {
+        AnalysisService service = new AnalysisService(temp, 8);
+        String fasta = LargeAlignmentFixtures.randomDnaFasta(
+                LARGE_SEQUENCES, LARGE_LENGTH, 4040L);
+        String id = service.submit(fasta,
+                new BootstrapConfig(10_000_000, 5L, 8, 1));
+        awaitTerminal(service, id);
+        assertEquals(AnalysisStatus.TIMEOUT, service.status(id).orElseThrow().getStatus());
+        assertFalse(service.getStore().hasOutputs(id));
+        assertNoTempFiles(service, id);
+        service.shutdown();
+    }
+
+    private static void awaitSomeButNotAllReplicates(AnalysisService service, String id, int total)
+            throws InterruptedException {
+        for (int i = 0; i < 200; i++) {
+            try {
+                int done = service.getStore().completedReplicates(id, total).size();
+                if (done > 0 && done < total) {
+                    return;
+                }
+            } catch (java.io.IOException e) {
+                throw new AssertionError(e);
+            }
+            Thread.sleep(20);
+        }
+        throw new AssertionError("task did not reach a partial state before the crash");
+    }
+
+    private static void assertNoTempFiles(AnalysisService service, String id)
+            throws java.io.IOException {
+        try (java.util.stream.Stream<Path> entries =
+                     java.nio.file.Files.walk(service.getStore().taskDirectory(id))) {
+            boolean leftover = entries
+                    .anyMatch(path -> path.getFileName().toString().startsWith(".tmp-"));
+            assertFalse(leftover, "temp/partial files left behind for task " + id);
+        }
     }
 
     private static final class AnalysisServiceInterruption implements AutoCloseable {

@@ -48,6 +48,32 @@ class FastaReaderTest {
     }
 
     @Test
+    void rejectsDuplicateNamesWithDistinctClientReason() {
+        AlignmentException error = reject(">a\nACGT\n>b\nACGA\n>a\nACGC\n");
+        assertEquals(RejectReason.DUPLICATE_NAME, error.getReason());
+        assertTrue(error.getMessage().contains("a"));
+    }
+
+    @Test
+    void rejectsPairWithoutComparableSitesEvenWhenAlignmentIsOtherwiseValid() {
+        // Overall the alignment is informative (a/c share sites and b/c share
+        // sites), but a and b never share a non-gap, non-unknown site.
+        AlignmentException error = reject(
+                ">a\nACGTACGT\n>b\n--NNNNNN\n>c\nTTTTAAAA\n");
+        assertEquals(RejectReason.INSUFFICIENT_INFORMATION, error.getReason());
+        assertTrue(error.getMessage().contains("'a'"));
+        assertTrue(error.getMessage().contains("'b'"));
+    }
+
+    @Test
+    void duplicateNameReasonDiffersFromInsufficientInformationReason() {
+        AlignmentException duplicate = reject(">x\nACGT\n>y\nACGA\n>x\nACGC\n");
+        AlignmentException insufficient = reject(">a\nAC\n>b\nNN\n");
+        assertEquals(RejectReason.DUPLICATE_NAME, duplicate.getReason());
+        assertEquals(RejectReason.INSUFFICIENT_INFORMATION, insufficient.getReason());
+    }
+
+    @Test
     void acceptsAmbiguityCodesAndGapsMixedWithKnownSites() {
         var alignment = FastaReader.parse(
                 ">a\nACGT-N?\n>b\nARGN.N-\n>c\nTTT.TN.\n");

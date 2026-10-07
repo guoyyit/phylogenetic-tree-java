@@ -55,7 +55,9 @@ public final class FastaReader {
                         ? "seq" + (names.size() + 1)
                         : header.split("\\s+", 2)[0];
                 if (!seenNames.add(name)) {
-                    throw new IllegalArgumentException("duplicate sequence name: " + name);
+                    throw new AlignmentException(RejectReason.DUPLICATE_NAME,
+                            "duplicate sequence name: '" + name
+                                    + "' (every sequence must have a unique name)");
                 }
                 names.add(name);
                 bodies.add(new StringBuilder());
@@ -130,7 +132,46 @@ public final class FastaReader {
             throw new AlignmentException(RejectReason.INSUFFICIENT_INFORMATION,
                     "alignment has no column with at least two non-gap, non-unknown residues");
         }
+        validatePairwiseComparable(sequences, length);
         return new Alignment(sequences, length);
+    }
+
+    /**
+     * Every pair of sequences must share at least one site where both residues are
+     * neither a gap nor fully unknown. This is checked at parse (submit) time so a
+     * violating request is rejected synchronously, before any task is created.
+     * Site membership is held in bit masks so the O(n^2 * L) scan stays fast for
+     * large inputs.
+     */
+    private static void validatePairwiseComparable(List<Sequence> sequences, int length) {
+        int n = sequences.size();
+        int blocks = (length + Long.SIZE - 1) / Long.SIZE;
+        long[][] known = new long[n][blocks];
+        for (int i = 0; i < n; i++) {
+            String data = sequences.get(i).data();
+            for (int column = 0; column < length; column++) {
+                if (isKnown(data.charAt(column))) {
+                    known[i][column >>> 6] |= 1L << (column & (Long.SIZE - 1));
+                }
+            }
+        }
+        for (int i = 0; i < n; i++) {
+            for (int j = i + 1; j < n; j++) {
+                boolean comparable = false;
+                for (int block = 0; block < blocks; block++) {
+                    if ((known[i][block] & known[j][block]) != 0L) {
+                        comparable = true;
+                        break;
+                    }
+                }
+                if (!comparable) {
+                    throw new AlignmentException(RejectReason.INSUFFICIENT_INFORMATION,
+                            "no comparable sites between '" + sequences.get(i).name()
+                                    + "' and '" + sequences.get(j).name()
+                                    + "' (all sites are gaps or unknown for this pair)");
+                }
+            }
+        }
     }
 
     public static Alignment read(Path path) throws IOException {

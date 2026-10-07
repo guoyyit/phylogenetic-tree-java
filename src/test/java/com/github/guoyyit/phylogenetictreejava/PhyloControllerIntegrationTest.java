@@ -80,4 +80,32 @@ class PhyloControllerIntegrationTest {
         JsonNode json = mapper.readTree(response.getBody());
         assertEquals("LENGTH_MISMATCH", json.get("error").asText());
     }
+
+    @Test
+    void duplicateNamesAreRejectedSynchronouslyWithDistinctReason() throws Exception {
+        String fasta = ">a\\nACGT\\n>b\\nACGA\\n>a\\nACGC\\n";
+        String body = "{\"fasta\":\"" + fasta + "\"}";
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        ResponseEntity<String> response = rest.postForEntity(url("/api/analyses"),
+                new HttpEntity<>(body, headers), String.class);
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        JsonNode json = mapper.readTree(response.getBody());
+        assertEquals("DUPLICATE_NAME", json.get("error").asText());
+        assertTrue(json.get("message").asText().contains("a"));
+    }
+
+    @Test
+    void nonComparablePairIsRejectedSynchronouslyWithInsufficientInformation() throws Exception {
+        // Valid overall alignment, but a and b never share a comparable site.
+        String fasta = ">a\\nACGTACGT\\n>b\\n--NNNNNN\\n>c\\nTTTTAAAA\\n";
+        String body = "{\"fasta\":\"" + fasta + "\"}";
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        ResponseEntity<String> response = rest.postForEntity(url("/api/analyses"),
+                new HttpEntity<>(body, headers), String.class);
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        JsonNode json = mapper.readTree(response.getBody());
+        assertEquals("INSUFFICIENT_INFORMATION", json.get("error").asText());
+    }
 }
